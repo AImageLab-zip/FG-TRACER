@@ -235,13 +235,12 @@ This script performs a word-level analysis of information flow for LLaMA-Vision,
 ## 🔗 Citing our work
 If you find this code and paper useful for your research, please kindly cite our paper.
 ```
-@inproceedings{2026WACV_fgtracer,
-	venue={Tucson, Arizona},
-	month={Mar},
-	year={2026},
-	booktitle={Winter Conference on Applications of Computer Vision},
-	title={{FG-TRACER: Tracing Information Flow in Multimodal Large Language Models in Free-Form Generation}},
-	author={Saporita, Alessia and Pipoli, Vittorio and Bolelli, Federico and Baraldi, Lorenzo and Acquaviva, Andrea and Ficarra, Elisa},
+@inproceedings{saporita2026fgtracer,
+  title     = {FG-TRACER: Tracing Information Flow in Multimodal Large Language Models in Free-Form Generation},
+  author    = {Saporita, Alessia and Pipoli, Vittorio and Bolelli, Federico and Baraldi, Lorenzo and Acquaviva, Andrea and Ficarra, Elisa},
+  booktitle = {Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
+  year      = {2026},
+  address   = {Tucson, Arizona, USA}
 }
 ```
 
