@@ -14,7 +14,7 @@ This repository includes all materials necessary to reproduce our framework acro
 - [Overview](#-overview)
   - [Introduction](#introduction)
   - [Key Features](#key-features)
-  - [FG-TRACER Framework](#fg-tracer-framework)
+--> <!-- - [FG-TRACER Framework](#fg-tracer-framework)-->
 - [Models](#%EF%B8%8F-models)
 - [Installation](#%EF%B8%8F-installation)
 - [Datasets](#%EF%B8%8F-datasets)
@@ -72,6 +72,7 @@ To avoid exponential distortion on long outputs, FG-TRACER **length-normalize** 
 
 $\Delta$ reflects true per-token influence, making results **robust and comparable** across different answer lengths.
 -->
+
 ## 🏛️ Models 
 We evaluate FG-TRACER on three publicly available MLLMs: 
 | Model    | Size    |  Download    |    
