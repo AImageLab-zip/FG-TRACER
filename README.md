@@ -22,6 +22,12 @@ This repository includes all materials necessary to reproduce our framework acro
 
 ## 📜 Overview 
 ### Introduction
+<img src="information/method.png" alt="Center" 
+    style="display: block; width: 100vw; height: auto; margin: 0; padding: 0;">
+  <figcaption><em><!--Overview of the FG-TRACER framework. 
+  For each output token, FG-TRACER computes the probabilities of the correct answer tokens with and without attention masking applied—<img src="https://latex.codecogs.com/svg.image?\hat{p_1},\ldots,\hat{p_L}" /> and <img src="https://latex.codecogs.com/svg.image?p_1,\ldots,p_L"/>, respectively—between selected token groups across a window of layers. The token-level probabilities <img src="https://latex.codecogs.com/svg.image?p_1,\ldots,p_L"/> and <img src="https://latex.codecogs.com/svg.image?\hat{p_1},\ldots,\hat{p_L}" /> are then multiplied, and normalized via the L-th root, where L is the answer token length, to avoid length-induced distortions. 
+  The information flow between the selected token groups is then quantified as the relative change in output probabilities (<img src="https://latex.codecogs.com/svg.image?\Delta" />) between the normalized probabilities computed with and without the attention masking. --></em></figcaption>
+</figure>
 FG-TRACER is a framework designed to analyze how information flows between visual and textual modalities in Multimodal Large Language Models (MLLMs) during free-form generation tasks— such as image captioning or chain-of-thought (CoT) reasoning.
 
 The core idea is to iteratively mask attention between specific target and source token groups across selected layers and measure the information flow as the change in output probability, where significant deviations indicate that the intervention disrupted a critical information pathway. This approach provides new insights into how MLLMs fuse multimodal information throughout the generation process.
@@ -35,12 +41,13 @@ The core idea is to iteratively mask attention between specific target and sourc
 
 * **📈 Word-level multimodal analysis**:  Our word-level analysis in image captioning and CoT reasoning, showing that terms expressing spatial, temporal, contextual, or procedural relations exhibit strong visual grounding.
 
+<!--
 ### FG-TRACER Framework
 <img src="information/method.png" alt="Center" 
     style="display: block; width: 100vw; height: auto; margin: 0; padding: 0;">
-  <figcaption><em><!--Overview of the FG-TRACER framework. 
+  <figcaption><em><Overview of the FG-TRACER framework. 
   For each output token, FG-TRACER computes the probabilities of the correct answer tokens with and without attention masking applied—<img src="https://latex.codecogs.com/svg.image?\hat{p_1},\ldots,\hat{p_L}" /> and <img src="https://latex.codecogs.com/svg.image?p_1,\ldots,p_L"/>, respectively—between selected token groups across a window of layers. The token-level probabilities <img src="https://latex.codecogs.com/svg.image?p_1,\ldots,p_L"/> and <img src="https://latex.codecogs.com/svg.image?\hat{p_1},\ldots,\hat{p_L}" /> are then multiplied, and normalized via the L-th root, where L is the answer token length, to avoid length-induced distortions. 
-  The information flow between the selected token groups is then quantified as the relative change in output probabilities (<img src="https://latex.codecogs.com/svg.image?\Delta" />) between the normalized probabilities computed with and without the attention masking. --></em></figcaption>
+  The information flow between the selected token groups is then quantified as the relative change in output probabilities (<img src="https://latex.codecogs.com/svg.image?\Delta" />) between the normalized probabilities computed with and without the attention masking.</em></figcaption>
 </figure>
 
 FG-TRACER analyzes the inner mechanisms of multimodal large language models in two main steps:
@@ -64,7 +71,7 @@ To avoid exponential distortion on long outputs, FG-TRACER **length-normalize** 
 </p>
 
 $\Delta$ reflects true per-token influence, making results **robust and comparable** across different answer lengths.
-
+-->
 ## 🏛️ Models 
 We evaluate FG-TRACER on three publicly available MLLMs: 
 | Model    | Size    |  Download    |    
@@ -143,6 +150,14 @@ For each model, the folder `tracing_information_flow/dataset/` contains the JSON
 If you want to generate your own JSON files, please follow the instructions below. 
 After generating it, make sure to set the `--data_path` argument in the script to point to your newly created file. This will ensure that the experiments run using your custom dataset.
 
+### - Plot the information flow
+To compute the information flow of the generated free-form answer, run the script `plot_information_flow.py`. Before running the script, set the paths. This script loads FG-TRACER outputs and visualizes information flow across models, and datasets.
+It generates several PDF figures (e.g., general information flow, window-size K ablations, and correct vs. wrong predictions) to support the analysis presented in the paper.
+
+### - Word-level analysis
+To reproduce our word level analysis, run the script `word_analysis.py`. Before running the script, set the paths.
+This script performs a word-level analysis of information flow for LLaMA-Vision, Qwen2.5-VL and LLaVA on COCO and ChartQA. For each correctly answered sample, it aggregates token-level probabilities into per-word measures, normalizing over subwords and computes per-word information flow. These word-level scores are accumulated across the dataset, and filtered by frequency and impact to find the most visual grounding words and the less ones. Finally, the script plots the layer-wise probability change curves for selected words for LLaMA-Vision for our ablation study.
+
 
 ### - If you want to re-create the datasets used for the analysis
 #### Step1: Evaluate the Model 
@@ -217,14 +232,6 @@ Before running these scripts, make sure to set the correct paths at the top of e
 ```
 tracing_information_flow/dataset/
 ```
-
-### - Plot the information flow
-To compute the information flow of the generated free-form answer, run the script `plot_information_flow.py`. Before running the script, set the paths. This script loads FG-TRACER outputs and visualizes information flow across models, and datasets.
-It generates several PDF figures (e.g., general information flow, window-size K ablations, and correct vs. wrong predictions) to support the analysis presented in the paper.
-
-### - Word-level analysis
-To reproduce our word level analysis, run the script `word_analysis.py`. Before running the script, set the paths.
-This script performs a word-level analysis of information flow for LLaMA-Vision, Qwen2.5-VL and LLaVA on COCO and ChartQA. For each correctly answered sample, it aggregates token-level probabilities into per-word measures, normalizing over subwords and computes per-word information flow. These word-level scores are accumulated across the dataset, and filtered by frequency and impact to find the most visual grounding words and the less ones. Finally, the script plots the layer-wise probability change curves for selected words for LLaMA-Vision for our ablation study.
 
 ## 📚 References
 * [Improved Baselines with Visual Instruction Tuning](https://github.com/haotian-liu/LLaVA)
