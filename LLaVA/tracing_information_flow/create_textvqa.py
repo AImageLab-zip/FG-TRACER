@@ -1,13 +1,13 @@
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 import json
 
-with open("LLaVA/tracing_information_flow/datasets/textvqa/correct_answers_textvqa.json", "r") as f:
+with open("./datasets/textvqa/correct_answers_textvqa.json", "r") as f:
     results = json.load(f)
     
 with open("/path/to/TextVQA/TextVQA_0.5.1_val.json", "r") as fp:
     data = json.load(fp)
 
-with open("LLaMAVision/tracing_information_flow/dataset/textvqa/filter_image_classes_textvqa.json", "r") as fp:
+with open("./datasets/textvqa/filter_image_classes_textvqa.json", "r") as fp:
     filter_image_classes = json.load(fp)
 
 datas = data['data'] #5000 samples
@@ -38,7 +38,7 @@ for result in results:  # 3926 results -> 2680 samples in filtered_classes
             new_results.append(result)
             break
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-with open("LLaVA/tracing_information_flow/datasets/textvqa/textvqa_dataset_correct_answers.json", "w") as f:
+with open("./datasets/textvqa/textvqa_dataset_correct_answers.json", "w") as f:
     json.dump(new_results, f, indent=4)
 # %%
 # correct answers' ids file  
@@ -51,7 +51,7 @@ for result in new_results:
             else:
                 id_q_types[q_type] = [result['questionId']]
 # %% 
-with open("LLaVA/tracing_information_flow/datasets/textvqa/ids_textvqa_wrong.json", "w") as f:
+with open("./datasets/textvqa/ids_textvqa.json", "w") as f:
     json.dump(id_q_types, f, indent=2)
 # %% 
 question_types_tot = {}
@@ -65,9 +65,12 @@ for sample in datas:
 # %%           
 # statistics for each question type
 for q_type in filter_classes:
-    print(f"{q_type} correct: {len(id_q_types[q_type])}")
-    print(f"{q_type} total: {len(question_types_tot[q_type])}")
-    print(f"{q_type} percentage: {len(id_q_types[q_type])/len(question_types_tot[q_type])}")
+    n_correct = len(id_q_types.get(q_type, []))       # a class with no correct answer
+    n_total = len(question_types_tot.get(q_type, [])) # is absent from id_q_types
+    print(f"{q_type} correct: {n_correct}")
+    print(f"{q_type} total: {n_total}")
+    if n_total:
+        print(f"{q_type} percentage: {n_correct/n_total}")
 # %%
 # average length of answer tokens for chosen image category 
 for category in filter_classes:
@@ -76,7 +79,9 @@ for category in filter_classes:
         if category in new_result['image_classes']:
             len_answ += len(new_result['answer_tokens'])
 
-    print(f"{category}: {len_answ/len(id_q_types[category])}")
+    n_cat = len(id_q_types.get(category, []))
+    if n_cat:
+        print(f"{category}: {len_answ/n_cat}")
 
 
 # %%

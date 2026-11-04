@@ -76,13 +76,13 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    os.makedirs(os.path.dirname(args.answer_path), exist_ok=True) 
+    os.makedirs(os.path.dirname(args.answer_path) or ".", exist_ok=True) 
     for k, v in args._get_kwargs():
         pad = ' '.join(['' for _ in range(25-len(k))])
         print(f"{k}:{pad} {v}", flush=True) 
     torch.cuda.set_device(0)
-    torch.manual_seed(1)
-    np.random.seed(1)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
     print('Initializing Model')
     predictor = Predictor(model_path=args.checkpoint_dir)
@@ -95,27 +95,26 @@ if __name__ == "__main__":
     with torch.no_grad():
         for data in tqdm(dataloader):
             images, questions, labels, image_ids = data
-            image = images[0]
-            question = questions[0]
-            label = labels[0]
-            message = (
-                    "You are provided a chart image and will be asked a question. "
-                    "You have to think through your answer and provide a step-by-step solution. "
-                    "Once you have the solution, write the final answer in at most a few words at the end with the phrase 'FINAL ANSWER:'. "
-                    f"The question is: {question} Let's think step by step."
-            )
 
-            print(f"Prompt:{message}\n", flush=True)
+            for image, question, label, image_id in zip(images, questions, labels, image_ids):
+                message = (
+                        "You are provided a chart image and will be asked a question. "
+                        "You have to think through your answer and provide a step-by-step solution. "
+                        "Once you have the solution, write the final answer in at most a few words at the end with the phrase 'FINAL ANSWER:'. "
+                        f"The question is: {question} Let's think step by step."
+                )
 
-            response, answer_tokens = predictor.generate(prompt=message, image=image, max_gen_tokens=1024)
-            
-            predictions.append({
-                'image_id': image_ids[0],
-                'answer': response,
-                'answer_tokens': answer_tokens.tolist(),
-                'gt_answer': label,
-                'question': question,                
-            })
+                print(f"Prompt:{message}\n", flush=True)
+
+                response, answer_tokens = predictor.generate(prompt=message, image=image, max_gen_tokens=1024)
+
+                predictions.append({
+                    'image_id': image_id,
+                    'answer': response,
+                    'answer_tokens': answer_tokens.tolist(),
+                    'gt_answer': label,
+                    'question': question,
+                })
 
     with open(args.answer_path, 'w') as f:
         json.dump(predictions, f, indent=4)

@@ -1,13 +1,10 @@
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 import sys
 sys.path.append('./')
-import ast
 import os
 import json
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import seaborn as sns
 from matplotlib.ticker import MultipleLocator
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # CHARTQA COMPLETE
@@ -51,6 +48,21 @@ list_ids_coco_qwen = json.load(open('Qwen2.5_VL/tracing_information_flow/dataset
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 eps=1e-15
+CLAMP_POSITIVE_TO_ZERO = False
+
+
+def _delta(p2_values, p1):
+    """Relative change in answer probability, in percent."""
+    out = [((p - p1) / p1) * 100 for p in p2_values]
+    if CLAMP_POSITIVE_TO_ZERO:
+        out = [d if d < 0 else 0 for d in out]
+    return out
+
+
+def _init_p2(sample_probs, key):
+    """One accumulator per layer, sized from the data rather than hardcoded to 40 / 28."""
+    return [1.0] * len(sample_probs[key][0][1])
+
 
 def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
     layers_change_probs = {}
@@ -61,6 +73,7 @@ def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
         list_ids = set(total_ids)
 
     count_tot = 0
+    counts = {}   # samples that actually carried each block type
     for id in list_ids: #for each sample in a category
         path = answer_path + "/" + str(id) + ".json"
         if os.path.exists(path):
@@ -78,6 +91,7 @@ def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
                 for idx, (token, prob) in enumerate(sample_probs['full_attention']):
                     if token == 'ER' and sample_probs['last_to_last'][idx + 1][0] == ':':
                         start_idx = idx + 2
+                
                 if start_idx is not None:
                     len_sample =  len(sample_probs['full_attention'][start_idx:])
                     p1 = 1
@@ -87,13 +101,16 @@ def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
                 else:
                     continue
             
-            elif (model == "Qwen" or model == "LLaMA") and FA:  #Qwen/LLaMA Vision + FA
-                # answer token length
-                len_sample = len(datas[id]['final_tokens'])
-                p1 = 1
-
+            elif (model == "Qwen" or model == "LLaMA") and FA:  # Qwen/LLaMA Vision + FA
                 start_idx = len(datas[id]['thought_tokens'])
-                for token, prob in sample_probs['full_attention'][start_idx:]:
+                tail = sample_probs['full_attention'][start_idx:]
+
+                len_sample = len(tail)
+                if len_sample == 0:
+                    continue
+
+                p1 = 1
+                for token, prob in tail:
                     p1 = p1 * (prob ** (1 / len_sample))
                 p1 = p1 + eps
             
@@ -104,12 +121,8 @@ def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
 
             ### Experiment 1
             if 'last_to_last' in sample_probs:
-                if model == "LLaVA" or model == "LLaMA":
-                    p2 = [1 for i in range(40)]
-                elif model == "Qwen":
-                    p2 = [1 for i in range(28)]
-                else:
-                    raise NotImplementedError
+                counts['last_to_last'] = counts.get('last_to_last', 0) + 1
+                p2 = _init_p2(sample_probs, 'last_to_last')
 
                 if not FA:
                     for token, prob in sample_probs['last_to_last']:
@@ -119,18 +132,14 @@ def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
                         p2 = [(a * (b**(1/len_sample))) for a, b in zip(p2, prob)]
 
                 if 'last_to_last' in layers_change_probs:
-                    change_prob = [((p - p1) / p1) * 100 if p - p1 < 0 else 0 for p in p2] 
+                    change_prob = _delta(p2, p1) 
                     layers_change_probs['last_to_last'] = [(a + b) for a, b in zip(layers_change_probs['last_to_last'], change_prob)]
                 else:
-                    layers_change_probs['last_to_last'] = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] 
+                    layers_change_probs['last_to_last'] = _delta(p2, p1) 
 
             if 'question_to_last' in sample_probs:
-                if model == "LLaVA" or model == "LLaMA":
-                    p2 = [1 for i in range(40)]
-                elif model == "Qwen":
-                    p2 = [1 for i in range(28)]
-                else:
-                    raise NotImplementedError
+                counts['question_to_last'] = counts.get('question_to_last', 0) + 1
+                p2 = _init_p2(sample_probs, 'question_to_last')
 
                 if not FA:
                     for token, prob in sample_probs['question_to_last']:
@@ -140,18 +149,14 @@ def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
                         p2 = [(a * (b**(1/len_sample))) for a, b in zip(p2, prob)]
                 
                 if 'question_to_last' in layers_change_probs:
-                    change_prob = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] 
+                    change_prob = _delta(p2, p1) 
                     layers_change_probs['question_to_last'] = [(a + b) for a, b in zip(layers_change_probs['question_to_last'], change_prob )]
                 else:
-                    layers_change_probs['question_to_last'] =  [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] 
+                    layers_change_probs['question_to_last'] =  _delta(p2, p1) 
         
             if 'image_to_last' in sample_probs:
-                if model == "LLaVA" or model == "LLaMA":
-                    p2 = [1 for i in range(40)]
-                elif model == "Qwen":
-                    p2 = [1 for i in range(28)]
-                else:
-                    raise NotImplementedError
+                counts['image_to_last'] = counts.get('image_to_last', 0) + 1
+                p2 = _init_p2(sample_probs, 'image_to_last')
 
                 if not FA:
                     for token, prob in sample_probs['image_to_last']:
@@ -161,19 +166,15 @@ def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
                         p2 = [(a * (b**(1/len_sample))) for a, b in zip(p2, prob)]
             
                 if 'image_to_last' in layers_change_probs:
-                    change_prob = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] 
+                    change_prob = _delta(p2, p1) 
                     layers_change_probs['image_to_last'] = [(a + b) for a, b in zip(layers_change_probs['image_to_last'], change_prob )]
                 else:
-                    layers_change_probs['image_to_last'] = [((p - p1) / p1) * 100 if p - p1 < 0 else 0 for p in p2] 
+                    layers_change_probs['image_to_last'] = _delta(p2, p1) 
         
             ### Experiment 2
             if 'image_to_question' in sample_probs:
-                if model == "LLaVA" or model == "LLaMA":
-                    p2 = [1 for i in range(40)]
-                elif model == "Qwen":
-                    p2 = [1 for i in range(28)]
-                else:
-                    raise NotImplementedError
+                counts['image_to_question'] = counts.get('image_to_question', 0) + 1
+                p2 = _init_p2(sample_probs, 'image_to_question')
 
                 if not FA:
                     for token, prob in sample_probs['image_to_question']:
@@ -183,18 +184,17 @@ def compute_curve(datas, list_ids, answer_path, FA=False, model=""):
                         p2 = [(a * (b**(1/len_sample))) for a, b in zip(p2, prob)]
 
                 if 'image_to_question' in layers_change_probs:
-                    change_prob = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] 
+                    change_prob = _delta(p2, p1) 
                     layers_change_probs['image_to_question'] = [(a + b) for a, b in zip(layers_change_probs['image_to_question'], change_prob )]
                 else:
-                    layers_change_probs['image_to_question'] = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] 
+                    layers_change_probs['image_to_question'] = _delta(p2, p1) 
 
         else:
-            #print(f"file json {path} does not exist!!")
             continue
 
     for key in layers_change_probs.keys():
-        layers_change_probs[key] = [x / count_tot for x in layers_change_probs[key]]
-    print(count_tot)
+        layers_change_probs[key] = [x / counts[key] for x in layers_change_probs[key]]
+    print(count_tot, counts)
     return layers_change_probs
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -336,6 +336,7 @@ def compute_curve_not_normalized(datas, list_ids, answer_path, FA=False, model="
         list_ids = set(total_ids)
 
     count_tot = 0
+    counts = {}   # samples that actually carried each block type
     for id in list_ids: #for each sample in a category
         path = answer_path + "/" + str(id) + ".json"
         if os.path.exists(path):
@@ -379,12 +380,8 @@ def compute_curve_not_normalized(datas, list_ids, answer_path, FA=False, model="
 
             ### Experiment 1
             if 'last_to_last' in sample_probs:
-                if model == "LLaVA" or model == "LLaMA":
-                    p2 = [1 for i in range(40)]
-                elif model == "Qwen":
-                    p2 = [1 for i in range(28)]
-                else:
-                    raise NotImplementedError
+                counts['last_to_last'] = counts.get('last_to_last', 0) + 1
+                p2 = _init_p2(sample_probs, 'last_to_last')
                 
                 if not FA:
                     for token, prob in sample_probs['last_to_last']:
@@ -394,18 +391,14 @@ def compute_curve_not_normalized(datas, list_ids, answer_path, FA=False, model="
                         p2 = [(a * b) for a, b in zip(p2, prob)]
 
                 if 'last_to_last' in layers_change_probs:
-                    change_prob = [((p - p1) / p1) * 100 if p - p1 < 0 else 0 for p in p2] #[((p**(1/len_sample) - p1**(1/len_sample)) / p1**(1/len_sample)) * 100 for p in p2]
+                    change_prob = _delta(p2, p1) 
                     layers_change_probs['last_to_last'] = [(a + b) for a, b in zip(layers_change_probs['last_to_last'], change_prob)]
                 else:
-                    layers_change_probs['last_to_last'] = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] #[((p**(1/len_sample) - p1**(1/len_sample)) / p1**(1/len_sample)) * 100 for p in p2]
+                    layers_change_probs['last_to_last'] = _delta(p2, p1) 
 
             if 'question_to_last' in sample_probs:
-                if model == "LLaVA" or model == "LLaMA":
-                    p2 = [1 for i in range(40)]
-                elif model == "Qwen":
-                    p2 = [1 for i in range(28)]
-                else:
-                    raise NotImplementedError
+                counts['question_to_last'] = counts.get('question_to_last', 0) + 1
+                p2 = _init_p2(sample_probs, 'question_to_last')
                 
                 if not FA:
                     for token, prob in sample_probs['question_to_last']:
@@ -415,18 +408,14 @@ def compute_curve_not_normalized(datas, list_ids, answer_path, FA=False, model="
                         p2 = [(a * b) for a, b in zip(p2, prob)]
 
                 if 'question_to_last' in layers_change_probs:
-                    change_prob = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] #[((p**(1/len_sample) - p1**(1/len_sample)) / p1**(1/len_sample)) * 100 for p in p2]
+                    change_prob = _delta(p2, p1) 
                     layers_change_probs['question_to_last'] = [(a + b) for a, b in zip(layers_change_probs['question_to_last'], change_prob )]
                 else:
-                    layers_change_probs['question_to_last'] =  [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] #[((p**(1/len_sample) - p1**(1/len_sample)) / p1**(1/len_sample)) * 100 for p in p2]
+                    layers_change_probs['question_to_last'] =  _delta(p2, p1) 
         
             if 'image_to_last' in sample_probs:
-                if model == "LLaVA" or model == "LLaMA":
-                    p2 = [1 for i in range(40)]
-                elif model == "Qwen":
-                    p2 = [1 for i in range(28)]
-                else:
-                    raise NotImplementedError
+                counts['image_to_last'] = counts.get('image_to_last', 0) + 1
+                p2 = _init_p2(sample_probs, 'image_to_last')
                 
                 if not FA:
                     for token, prob in sample_probs['image_to_last']:
@@ -436,19 +425,15 @@ def compute_curve_not_normalized(datas, list_ids, answer_path, FA=False, model="
                         p2 = [(a * b) for a, b in zip(p2, prob)]
             
                 if 'image_to_last' in layers_change_probs:
-                    change_prob = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] #[((p**(1/len_sample) - p1**(1/len_sample)) / p1**(1/len_sample)) * 100 for p in p2]
+                    change_prob = _delta(p2, p1) 
                     layers_change_probs['image_to_last'] = [(a + b) for a, b in zip(layers_change_probs['image_to_last'], change_prob )]
                 else:
-                    layers_change_probs['image_to_last'] = [((p - p1) / p1) * 100 if p - p1 < 0 else 0 for p in p2] #[((p**(1/len_sample) - p1**(1/len_sample)) / p1**(1/len_sample)) * 100 for p in p2]
+                    layers_change_probs['image_to_last'] = _delta(p2, p1) 
         
             ### Experiment 2
             if 'image_to_question' in sample_probs:
-                if model == "LLaVA" or model == "LLaMA":
-                    p2 = [1 for i in range(40)]
-                elif model == "Qwen":
-                    p2 = [1 for i in range(28)]
-                else:
-                    raise NotImplementedError
+                counts['image_to_question'] = counts.get('image_to_question', 0) + 1
+                p2 = _init_p2(sample_probs, 'image_to_question')
                 
                 if not FA:
                     for token, prob in sample_probs['image_to_question']:
@@ -458,17 +443,16 @@ def compute_curve_not_normalized(datas, list_ids, answer_path, FA=False, model="
                         p2 = [(a * b) for a, b in zip(p2, prob)]
 
                 if 'image_to_question' in layers_change_probs:
-                    change_prob = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] #[((p**(1/len_sample) - p1**(1/len_sample)) / p1**(1/len_sample)) * 100 for p in p2]
+                    change_prob = _delta(p2, p1) 
                     layers_change_probs['image_to_question'] = [(a + b) for a, b in zip(layers_change_probs['image_to_question'], change_prob )]
                 else:
-                    layers_change_probs['image_to_question'] = [((p - p1) / p1) * 100 if p - p1 < 0 else 0  for p in p2] #[((p**(1/len_sample) - p1**(1/len_sample)) / p1**(1/len_sample)) * 100 for p in p2]
+                    layers_change_probs['image_to_question'] = _delta(p2, p1) 
 
         else:
-            #print(f"file json {path} does not exist!!")
             continue
 
     for key in layers_change_probs.keys():
-        layers_change_probs[key] = [x / count_tot for x in layers_change_probs[key]]
+        layers_change_probs[key] = [x / counts[key] for x in layers_change_probs[key]]
 
     return layers_change_probs
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

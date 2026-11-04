@@ -67,6 +67,26 @@ if is_torch_fx_available():
 
 logger = logging.get_logger(__name__)
 
+
+NEG_INF = float("-inf")
+
+
+def _assert_rows_visible(mask, dtype, name):
+    """Check that every query row in `mask` keeps at least one visible key.
+
+    softmax(s + c) == softmax(s) for a constant c, so masking *every* key of a row
+    leaves the attention weights untouched: the pathway is not cut at all. With
+    NEG_INF the same situation yields NaN instead. Either way, a fully masked row
+    cannot be blocked through the attention mask alone.
+    """
+    visible = (mask > torch.finfo(dtype).min / 2).any(dim=-1)
+    if not bool(visible.all()):
+        raise RuntimeError(
+            f"{name}: at least one query row has every key masked. This pathway "
+            "cannot be cut through the attention mask alone."
+        )
+
+
 _CONFIG_FOR_DOC = "LlamaConfig"
 
 
@@ -231,8 +251,10 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     """
     cos = cos[position_ids].unsqueeze(unsqueeze_dim)
     sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
+
     return q_embed, k_embed
 
 
@@ -400,7 +422,9 @@ class LlamaAttention(nn.Module):
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
@@ -423,6 +447,7 @@ class LlamaAttention(nn.Module):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
+            
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
@@ -954,11 +979,14 @@ class LlamaModel(LlamaPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
+        
         self._use_sdpa = config._attn_implementation == "sdpa"
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.gradient_checkpointing = False
@@ -1029,6 +1057,7 @@ class LlamaModel(LlamaPreTrainedModel):
         if self._use_flash_attention_2:
             # 2d mask is passed through the layers
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+
         elif self._use_sdpa and not output_attentions:
             # output_attentions=True can not be supported when using SDPA, and we fall back on
             # the manual implementation that requires a 4D causal mask in all cases.
@@ -1176,28 +1205,44 @@ class LlamaModel(LlamaPreTrainedModel):
 
                 # Block last position from attending to itself
                 if block_type == "last_to_last":
-                    expanded_attention_mask[left_border:right_border, :, :, -1, -1] = torch.finfo(inputs_embeds.dtype).min
+                    expanded_attention_mask[left_border:right_border, :, :, -1, -1] = NEG_INF
+                    _assert_rows_visible(
+                        expanded_attention_mask[left_border:right_border, :, :, -1:, :],
+                        inputs_embeds.dtype, block_type,
+                    )
 
                 # Block last position from attending to the specified modality (Q, I)
                 elif block_type == "question_to_last":
                     for idx, image_ind in enumerate(image_indices):
                         start_img_tokens, len_img_tokens = image_ind
                         end_img_tokens = start_img_tokens + len_img_tokens
-                        expanded_attention_mask[left_border:right_border, idx, :, -1, end_img_tokens:-1] = torch.finfo(inputs_embeds.dtype).min      # masking question with last token not included
-                        expanded_attention_mask[left_border:right_border, idx, :, -1, :start_img_tokens] = torch.finfo(inputs_embeds.dtype).min      # masking system message
+                        expanded_attention_mask[left_border:right_border, idx, :, -1, end_img_tokens:-1] = NEG_INF      # masking question with last token not included
+                        expanded_attention_mask[left_border:right_border, idx, :, -1, :start_img_tokens] = NEG_INF      # masking system message
+                        _assert_rows_visible(
+                            expanded_attention_mask[left_border:right_border, :, :, -1:, :],
+                            inputs_embeds.dtype, block_type,
+                        )
 
                 elif block_type == "image_to_last":
                     for idx, image_ind in enumerate(image_indices):
                         start_img_tokens, len_img_tokens = image_ind
                         end_img_tokens = start_img_tokens + len_img_tokens
-                        expanded_attention_mask[left_border:right_border, idx, :, -1, start_img_tokens:end_img_tokens] = torch.finfo(inputs_embeds.dtype).min
+                        expanded_attention_mask[left_border:right_border, idx, :, -1, start_img_tokens:end_img_tokens] = NEG_INF
+                        _assert_rows_visible(
+                            expanded_attention_mask[left_border:right_border, :, :, -1:, :],
+                            inputs_embeds.dtype, block_type,
+                        )
                 
                 # Block question from attending to the image
                 elif block_type == "image_to_question":
                     for idx, image_ind in enumerate(image_indices):
                         start_img_tokens, len_img_tokens = image_ind
                         end_img_tokens = start_img_tokens + len_img_tokens
-                        expanded_attention_mask[left_border:right_border, idx, :, end_img_tokens:-1, start_img_tokens:end_img_tokens] = torch.finfo(inputs_embeds.dtype).min                       
+                        expanded_attention_mask[left_border:right_border, idx, :, end_img_tokens:-1, start_img_tokens:end_img_tokens] = NEG_INF                       
+                        _assert_rows_visible(
+                            expanded_attention_mask[left_border:right_border, idx, :, end_img_tokens:-1, :],
+                            inputs_embeds.dtype, block_type,
+                        )
 
                 hidden_states_out = hidden_states.detach().clone()  
                 
@@ -1335,6 +1380,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             logits = torch.cat(logits, dim=-1)
         else:
             logits = self.lm_head(hidden_states)
+        
         logits = logits.float()
 
         loss = None

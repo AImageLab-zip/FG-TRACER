@@ -333,14 +333,21 @@ class LlavaMetaForCausalLM(ABC):
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
+
             concat_images = torch.cat([image for image in images], dim=0)
+
             image_features = self.encode_images(concat_images)
+
             split_sizes = [image.shape[0] for image in images]
+
             image_features = torch.split(image_features, split_sizes, dim=0)
+
             mm_patch_merge_type = getattr(self.config, 'mm_patch_merge_type', 'flat')
             image_aspect_ratio = getattr(self.config, 'image_aspect_ratio', 'square')
+
             if mm_patch_merge_type == 'flat':
                 image_features = [x.flatten(0, 1) for x in image_features]
+
             elif mm_patch_merge_type.startswith('spatial'):
                 new_image_features = []
                 for image_idx, image_feature in enumerate(image_features):
@@ -416,14 +423,18 @@ class LlavaMetaForCausalLM(ABC):
 
             image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
             # [-1, IMAGE_TOKEN_INDEX_pos, seq_length] 
+
             cur_input_ids_noim = []
             for i in range(len(image_token_indices) - 1):
                 cur_input_ids_noim.append(cur_input_ids[image_token_indices[i]+1:image_token_indices[i+1]])
-            # cur_input_ids_noim -> cur_input_ids_before_image_token=[0, IMAGE_TOKEN_INDEX_pos-1] + cur_input_ids_after_image_token=cur_input_ids[IMAGE_TOKEN_INDEX_pos+1, seq_length-1] 
+                # cur_input_ids_noim -> cur_input_ids_before_image_token=[0, IMAGE_TOKEN_INDEX_pos-1] + cur_input_ids_after_image_token=cur_input_ids[IMAGE_TOKEN_INDEX_pos+1, seq_length-1] 
+            
             split_sizes = [x.shape[0] for x in cur_input_ids_noim]
             # split_sizes = [IMAGE_TOKEN_INDEX_pos, seq_length-IMAGE_TOKEN_INDEX_pos-1]
+            
             cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
             # cur_input_embeds = (seq_length-1, 5120)
+            
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
             # cur_input_embeds_no_im -> 
             # cur_input_embeds_before_image_token = (IMAGE_TOKEN_INDEX_pos, 5120) + cur_input_embeds_after_image_token=(seq_length-IMAGE_TOKEN_INDEX_pos-1, 5120) 
@@ -437,6 +448,7 @@ class LlavaMetaForCausalLM(ABC):
                     # cur_image_features = (576, 5120)
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
+                    
                     image_indices.append([image_token_indices[1], cur_image_features.shape[0]])
                     # (begin_image_tokens, image_tokens_length)
                     

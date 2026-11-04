@@ -71,13 +71,13 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    os.makedirs(os.path.dirname(args.answer_path), exist_ok=True) 
+    os.makedirs(os.path.dirname(args.answer_path) or ".", exist_ok=True) 
     for k, v in args._get_kwargs():
         pad = ' '.join(['' for _ in range(25-len(k))])
         print(f"{k}:{pad} {v}", flush=True) 
     torch.cuda.set_device(0)
-    torch.manual_seed(1)
-    np.random.seed(1)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
     print('Initializing Model')
     predictor = Predictor(model_path=args.checkpoint_dir)
@@ -88,29 +88,37 @@ if __name__ == "__main__":
     print("Starting...")
     predictions = []
     index = 0
+    last_checkpoint = 0
+    stem = args.answer_path[:-5] if args.answer_path.endswith('.json') else args.answer_path
+
     with torch.no_grad():
         for data in tqdm(dataloader):
             images, image_ids = data
-            image = images[0]
 
-            message = "Provide a detailed description for the given image in one sentence."                
-    
+            message = "Provide a detailed description for the given image in one sentence."
+
             print(f"Prompt:{message}\n", flush=True)
 
-            response, answer_tokens = predictor.generate(prompt=message, image=image, max_gen_tokens=1024)
-            predictions.append({
-                'image_id': image_ids[0],
-                'caption': response,  
-                'answer_tokens': answer_tokens.tolist()               
-            })
+            for image, image_id in zip(images, image_ids):
+                response, answer_tokens = predictor.generate(prompt=message, image=image, max_gen_tokens=1024)
+                predictions.append({
+                    'image_id': image_id,
+                    'caption': response,
+                    'answer_tokens': answer_tokens.tolist()
+                })
 
             index += len(image_ids)
-            if index % 5000 == 0:
+
+            if index - last_checkpoint >= 5000:
+                last_checkpoint = index
                 print(f"Processed {index} images")
-                output_path = f"{args.answer_path}_{index}.json"
+
+                output_path = f"{stem}_{index}.json"
+
                 with open(output_path, 'w') as f:
                     json.dump(predictions, f, indent=4)
 
-        output_path = f"{args.answer_path}_{index}.json"
+        output_path = f"{stem}_{index}.json"
+        
         with open(output_path, 'w') as f:
             json.dump(predictions, f, indent=4)

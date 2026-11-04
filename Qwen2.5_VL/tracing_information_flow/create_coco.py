@@ -21,7 +21,7 @@ for id in list_ids:
     answer_tokens = result['answer_tokens']
 
     # clean from eos_token_id tokens
-    while answer_tokens[-1] == 151645:
+    while answer_tokens and answer_tokens[-1] == 151645:
         answer_tokens= answer_tokens[:-1]
     result['answer_tokens'] = answer_tokens
     result['file_name'] = sample['file_name']

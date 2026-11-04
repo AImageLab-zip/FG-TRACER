@@ -50,6 +50,26 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLCo
 logger = logging.get_logger(__name__)
 
 
+NEG_INF = float("-inf")
+
+
+def _assert_rows_visible(mask, dtype, name):
+    """Check that every query row in `mask` keeps at least one visible key.
+
+    softmax(s + c) == softmax(s) for a constant c, so masking *every* key of a row
+    leaves the attention weights untouched: the pathway is not cut at all. With
+    NEG_INF the same situation yields NaN instead. Either way, a fully masked row
+    cannot be blocked through the attention mask alone.
+    """
+    visible = (mask > torch.finfo(dtype).min / 2).any(dim=-1)
+    if not bool(visible.all()):
+        raise RuntimeError(
+            f"{name}: at least one query row has every key masked. This pathway "
+            "cannot be cut through the attention mask alone."
+        )
+
+
+
 class Qwen2_5_VLMLP(nn.Module):
     def __init__(self, config, bias: bool = False):
         super().__init__()
@@ -1032,28 +1052,44 @@ class Qwen2_5_VLTextModel(Qwen2_5_VLPreTrainedModel):
                 # update mask according to the block type
                 # Block last position from attending to itself
                 if block_type == "last_to_last":
-                    expanded_attention_mask[left_border:right_border, :, :, -1, -1] = torch.finfo(inputs_embeds.dtype).min
+                    expanded_attention_mask[left_border:right_border, :, :, -1, -1] = NEG_INF
+                    _assert_rows_visible(
+                        expanded_attention_mask[left_border:right_border, :, :, -1:, :],
+                        inputs_embeds.dtype, block_type,
+                    )
 
                 # Block last position from attending to the specified modality (Q, I)
                 elif block_type == "question_to_last":
                     for idx, image_ind in enumerate(image_indices):
                         start_img_tokens, len_img_tokens = image_ind
                         end_img_tokens = start_img_tokens + len_img_tokens
-                        expanded_attention_mask[left_border:right_border, idx, :, -1, end_img_tokens:-1] = torch.finfo(inputs_embeds.dtype).min      # masking question with last token not included
-                        expanded_attention_mask[left_border:right_border, idx, :, -1, :start_img_tokens] = torch.finfo(inputs_embeds.dtype).min    # masking system message
+                        expanded_attention_mask[left_border:right_border, idx, :, -1, end_img_tokens:-1] = NEG_INF      # masking question with last token not included
+                        expanded_attention_mask[left_border:right_border, idx, :, -1, :start_img_tokens] = NEG_INF    # masking system message
+                        _assert_rows_visible(
+                            expanded_attention_mask[left_border:right_border, :, :, -1:, :],
+                            inputs_embeds.dtype, block_type,
+                        )
 
                 elif block_type == "image_to_last":
                     for idx, image_ind in enumerate(image_indices):
                         start_img_tokens, len_img_tokens = image_ind
                         end_img_tokens = start_img_tokens + len_img_tokens
-                        expanded_attention_mask[left_border:right_border, idx, :, -1, start_img_tokens:end_img_tokens] = torch.finfo(inputs_embeds.dtype).min
+                        expanded_attention_mask[left_border:right_border, idx, :, -1, start_img_tokens:end_img_tokens] = NEG_INF
+                        _assert_rows_visible(
+                            expanded_attention_mask[left_border:right_border, :, :, -1:, :],
+                            inputs_embeds.dtype, block_type,
+                        )
                       
                 # Block question from attending to the image
                 elif block_type == "image_to_question":
                     for idx, image_ind in enumerate(image_indices):
                         start_img_tokens, len_img_tokens = image_ind
                         end_img_tokens = start_img_tokens + len_img_tokens
-                        expanded_attention_mask[left_border:right_border, idx, :, end_img_tokens:-1, start_img_tokens:end_img_tokens] = torch.finfo(inputs_embeds.dtype).min                       
+                        expanded_attention_mask[left_border:right_border, idx, :, end_img_tokens:-1, start_img_tokens:end_img_tokens] = NEG_INF                       
+                        _assert_rows_visible(
+                            expanded_attention_mask[left_border:right_border, idx, :, end_img_tokens:-1, :],
+                            inputs_embeds.dtype, block_type,
+                        )
 
                 hidden_states_out = hidden_states.detach().clone()  
 

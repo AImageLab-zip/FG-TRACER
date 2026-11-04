@@ -1,7 +1,7 @@
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 import json
 
-with open("LLaVA/tracing_information_flow/datasets/chartqa/correct_answers_chartqa.json", "r") as f:
+with open("./datasets/chartqa/correct_answers_chartqa.json", "r") as f:
     results = json.load(f)
 
 #%%%#####################################################
@@ -13,15 +13,17 @@ for result in results:  # 2067 results
     question = result['question']
     answer_tokens = result['answer_tokens']
 
-    # Pulisci dai bos_id
-    if answer_tokens[0] == 1:
+    # strip the leading BOS (1) and any trailing EOS (2): generation.py records neither
+    if answer_tokens and answer_tokens[0] == 1:
         answer_tokens = answer_tokens[1:]
+    while answer_tokens and answer_tokens[-1] == 2:
+        answer_tokens = answer_tokens[:-1]
 
     result['answer_tokens'] = answer_tokens
     new_results_complete.append(result)
 # %%##########
 # Scrittura su file
-with open("LLaVA/tracing_information_flow/datasets/chartqa/chartqa_dataset_correct_answers_complete.json", "w") as f:
+with open("./datasets/chartqa/chartqa_dataset_correct_answers_complete.json", "w") as f:
     json.dump(new_results_complete, f, indent=4)
 # %%###########
 # average length of answer tokens 
@@ -54,3 +56,4 @@ for new_result in new_results_complete:
         max = len(new_result['answer_tokens'])
 print(f"{max} max answer tokens")
 print(f"{min} min answer tokens")
+# %%

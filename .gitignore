@@ -64,3 +64,8 @@ Qwen2.5_VL/example.py
 Qwen2.5_VL/bash.sh
 Qwen2.5_VL/tracing_information_flow/eval_chartqa.py
 Qwen2.5_VL/README.md
+
+fg-tracer-fixes.patch
+00339007006077.png
+LLaMAVision/model/modeling_mllama_backup.py
+LLaMAVision/check_cross_attention_blocking.py

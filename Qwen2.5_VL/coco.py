@@ -60,13 +60,13 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    os.makedirs(os.path.dirname(args.answer_path), exist_ok=True) 
+    os.makedirs(os.path.dirname(args.answer_path) or ".", exist_ok=True) 
     for k, v in args._get_kwargs():
         pad = ' '.join(['' for _ in range(25-len(k))])
         print(f"{k}:{pad} {v}", flush=True) 
     torch.cuda.set_device(0)
-    torch.manual_seed(1)
-    np.random.seed(1)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
     print('Initializing Model')
     model = Qwen2_5_VL_Generation(args.checkpoint_dir)
@@ -78,6 +78,10 @@ if __name__ == "__main__":
     print("Starting...")
     predictions = []
     index = 0
+    last_checkpoint = 0
+    # answer_path already ends in .json; appending the index to it produced
+    # names like "coco.json_6000.json"
+    stem = args.answer_path[:-5] if args.answer_path.endswith('.json') else args.answer_path
     with torch.no_grad():
         for data in tqdm(dataloader):
             images, image_ids = data
@@ -117,12 +121,13 @@ if __name__ == "__main__":
                 })
 
             index += len(image_ids)
-            if index % 5000 == 0:
+            if index - last_checkpoint >= 5000:
+                last_checkpoint = index
                 print(f"Processed {index} images")
-                output_path = f"{args.answer_path}_{index}.json"
+                output_path = f"{stem}_{index}.json"
                 with open(output_path, 'w') as f:
                     json.dump(predictions, f, indent=4)
 
-        output_path = f"{args.answer_path}_{index}.json"
+        output_path = f"{stem}_{index}.json"
         with open(output_path, 'w') as f:
             json.dump(predictions, f, indent=4)

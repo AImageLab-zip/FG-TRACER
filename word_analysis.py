@@ -22,7 +22,7 @@ list_ids_llava_chartqa = list(range(len(datas_llava_chartqa)))
 answer_path_llava_chartqa = "LLaVA/results/chartqa"
 
 datas_qwen_chartqa = json.load(open('Qwen2.5_VL/tracing_information_flow/datasets/chartqa/chartqa_dataset_correct_answers.json'))
-list_ids_qwen_chartqa = list(range(len(datas_llava_chartqa)))
+list_ids_qwen_chartqa = list(range(len(datas_qwen_chartqa)))
 answer_path_qwen_chartqa = "Qwen2.5_VL/results/chartqa"
 
 # COCO
@@ -48,6 +48,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 import plotly.express as px
 import spacy
+
+CLAMP_POSITIVE_TO_ZERO = False
+
+
+def _delta(p2_values, p1):
+    """Relative change in answer probability, in percent."""
+    out = [((p2 - p1) / p1) * 100 for p2 in p2_values]
+    if CLAMP_POSITIVE_TO_ZERO:
+        out = [d if d < 0 else 0 for d in out]
+    return out
+
 import string
 import re
 
@@ -84,10 +95,10 @@ def create_df_llama(list_ids, answer_path):
                         p2_l2l = [p2 ** (1 / subword_count) for p2 in p2_l2l]
 
                         # Compute information drop
-                        change_prob_q2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_q2l]
-                        change_prob_i2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_i2l]
-                        change_prob_i2q_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_i2q]
-                        change_prob_l2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_l2l]
+                        change_prob_q2l_neg = _delta(p2_q2l, p1)
+                        change_prob_i2l_neg = _delta(p2_i2l, p1)
+                        change_prob_i2q_neg = _delta(p2_i2q, p1)
+                        change_prob_l2l_neg = _delta(p2_l2l, p1)
                         
                         change_prob_q2l = [((p2 - p1) / p1) * 100 for p2 in p2_q2l]
                         change_prob_i2l = [((p2 - p1) / p1) * 100 for p2 in p2_i2l]
@@ -116,6 +127,7 @@ def create_df_llama(list_ids, answer_path):
                         current_word = ""
                         subword_count = 0
                         p1 = 1
+                        p2_i2q = p2_i2l = p2_q2l = p2_l2l = None
                         continue
 
                     current_word = item[0].lstrip()
@@ -130,12 +142,20 @@ def create_df_llama(list_ids, answer_path):
                 else: #word continue
                     current_word += item[0]
                     p1 *= item[1]
-                    subword_count += 1   
+                    subword_count += 1
 
-                    p2_i2q = p2_i2q * np.array(sample_probs['image_to_question'][idx][1])
-                    p2_i2l = p2_i2l * np.array(sample_probs['image_to_last'][idx][1])
-                    p2_q2l = p2_q2l * np.array(sample_probs['question_to_last'][idx][1])
-                    p2_l2l = p2_l2l * np.array(sample_probs['last_to_last'][idx][1])
+                    cur_i2q = np.array(sample_probs['image_to_question'][idx][1])
+                    cur_i2l = np.array(sample_probs['image_to_last'][idx][1])
+                    cur_q2l = np.array(sample_probs['question_to_last'][idx][1])
+                    cur_l2l = np.array(sample_probs['last_to_last'][idx][1])
+
+                    if p2_i2q is None:   # first subword after a bare space token
+                        p2_i2q, p2_i2l, p2_q2l, p2_l2l = cur_i2q, cur_i2l, cur_q2l, cur_l2l
+                    else:
+                        p2_i2q = p2_i2q * cur_i2q
+                        p2_i2l = p2_i2l * cur_i2l
+                        p2_q2l = p2_q2l * cur_q2l
+                        p2_l2l = p2_l2l * cur_l2l
 
         
             if current_word: # end of a previous word
@@ -152,10 +172,10 @@ def create_df_llama(list_ids, answer_path):
                 p2_l2l = [p2 ** (1 / subword_count) for p2 in p2_l2l]
 
                 # Compute information drop
-                change_prob_q2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_q2l]
-                change_prob_i2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_i2l]
-                change_prob_i2q_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_i2q]
-                change_prob_l2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_l2l]
+                change_prob_q2l_neg = _delta(p2_q2l, p1)
+                change_prob_i2l_neg = _delta(p2_i2l, p1)
+                change_prob_i2q_neg = _delta(p2_i2q, p1)
+                change_prob_l2l_neg = _delta(p2_l2l, p1)
                 
                 change_prob_q2l = [((p2 - p1) / p1) * 100 for p2 in p2_q2l]
                 change_prob_i2l = [((p2 - p1) / p1) * 100 for p2 in p2_i2l]
@@ -214,10 +234,10 @@ def create_df_llava(list_ids, answer_path):
                 p2_l2l = np.array(sample_probs['last_to_last'][idx][1])
                     
                 # Compute information drop
-                change_prob_q2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_q2l]
-                change_prob_i2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_i2l]
-                change_prob_i2q_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_i2q]
-                change_prob_l2l_neg = [((p2 - p1) / p1) * 100 if (((p2 - p1) / p1) * 100) < 0 else 0 for p2 in p2_l2l]
+                change_prob_q2l_neg = _delta(p2_q2l, p1)
+                change_prob_i2l_neg = _delta(p2_i2l, p1)
+                change_prob_i2q_neg = _delta(p2_i2q, p1)
+                change_prob_l2l_neg = _delta(p2_l2l, p1)
                 
                 change_prob_q2l = [((p2 - p1) / p1) * 100 for p2 in p2_q2l]
                 change_prob_i2l = [((p2 - p1) / p1) * 100 for p2 in p2_i2l]

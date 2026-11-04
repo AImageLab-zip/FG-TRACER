@@ -68,9 +68,12 @@ for sample in datas:
 # %%           
 # statistics for each question type
 for q_type in filter_classes:
-    print(f"{q_type} correct: {len(id_q_types[q_type])}")
-    print(f"{q_type} total: {len(question_types_tot[q_type])}")
-    print(f"{q_type} percentage: {len(id_q_types[q_type])/len(question_types_tot[q_type])}")
+    n_correct = len(id_q_types.get(q_type, []))       # a class with no correct answer
+    n_total = len(question_types_tot.get(q_type, [])) # is absent from id_q_types
+    print(f"{q_type} correct: {n_correct}")
+    print(f"{q_type} total: {n_total}")
+    if n_total:
+        print(f"{q_type} percentage: {n_correct/n_total}")
 # %%
 # average length of answer tokens for chosen image category 
 for category in filter_classes:
@@ -79,7 +82,9 @@ for category in filter_classes:
         if category in new_result['image_classes']:
             len_answ += len(new_result['answer_tokens'])
 
-    print(f"{category}: {len_answ/len(id_q_types[category])}")
+    n_cat = len(id_q_types.get(category, []))
+    if n_cat:
+        print(f"{category}: {len_answ/n_cat}")
 
 
 # %%

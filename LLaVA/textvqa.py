@@ -79,13 +79,13 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    os.makedirs(os.path.dirname(args.answer_path), exist_ok=True) 
+    os.makedirs(os.path.dirname(args.answer_path) or ".", exist_ok=True) 
     for k, v in args._get_kwargs():
         pad = ' '.join(['' for _ in range(25-len(k))])
         print(f"{k}:{pad} {v}", flush=True) 
     torch.cuda.set_device(0)
-    torch.manual_seed(1)
-    np.random.seed(1)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
     print('Initializing Model')
     predictor = Predictor(model_path=args.checkpoint_dir)
@@ -98,20 +98,17 @@ if __name__ == "__main__":
     with torch.no_grad():
         for data in tqdm(dataloader):
             images, questions, labels, questionIds = data
-            image = images[0]
-            question = questions[0]
 
-            response, answer_tokens = predictor.generate(prompt=question, image=image, max_gen_tokens=1024)
-            # (B, generated_length)
-            
+            for image, question, label, questionId in zip(images, questions, labels, questionIds):
+                response, answer_tokens = predictor.generate(prompt=question, image=image, max_gen_tokens=1024)
 
-            predictions.append({
-                'questionId': questionIds[0],
-                'answer': response, #string of generated text
-                'answer_tokens': answer_tokens.tolist(), #tensor of generated ids
-                'gt_answer': labels[0],
-                'question': question,                
-            })
+                predictions.append({
+                    'questionId': questionId,
+                    'answer': response, #string of generated text
+                    'answer_tokens': answer_tokens.tolist(), #tensor of generated ids
+                    'gt_answer': label,
+                    'question': question,
+                })
             
     with open(args.answer_path, 'w') as f:
         json.dump(predictions, f, indent=4)

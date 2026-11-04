@@ -6,13 +6,17 @@ with open("Qwen2.5_VL/tracing_information_flow/datasets/chartqa/correct_answers_
 
 # %%######
 def split_by_sublist(big_list, sub_list):
+    """Split on the LAST occurrence of sub_list, returning (prefix incl. sub, suffix).
+
+    eval_chartqa.py selects the final answer with the last marker, so splitting here on
+    the first one would judge a sample on one span and analyse a different one: a chain of
+    thought often writes "Answer:" mid-reasoning and again at the end.
+    """
     n = len(sub_list)
-    for i in range(len(big_list) - n + 1):
+    for i in range(len(big_list) - n, -1, -1):
         if big_list[i:i+n] == sub_list:
-            before = big_list[:i+n]  # include sub_list
-            after = big_list[i+n:]   # dopo sub_list
-            return before, after
-    return None, None  # se sub non trovato
+            return big_list[:i+n], big_list[i+n:]
+    return None, None
 
 
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

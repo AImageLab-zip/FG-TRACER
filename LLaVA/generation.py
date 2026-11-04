@@ -8,11 +8,10 @@
 
 import torch
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
-from llava.conversation import conv_templates, SeparatorStyle
+from llava.conversation import conv_templates
 from llava.model.builder import load_pretrained_model
-from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, process_images
-from typing import Callable, Generator, List, Optional
+from typing import List, Optional
 import torch.nn as nn
 
 
@@ -77,7 +76,9 @@ class Predictor(nn.Module):
         answer_tokens,
         image,
         thought_answer=None,
-        temperature: float = 0.2,
+        temperature: float = 1.0,   # 1.0 = the model's own distribution. Anything else
+                                            # rescales every probability and makes the deltas
+                                            # incomparable across models.
         max_gen_len: Optional[int] = None,
         block_types: List[str] = None,
         k: int = 9,
@@ -120,6 +121,11 @@ class Predictor(nn.Module):
         for j, t in enumerate(input_ids):
             tokens[j, : len(t)] = t.clone().detach()  
 
+        assert temperature > 0, "temperature must be positive"
+        # answer_token.item() below collapses the batch dimension, so a batch larger
+        # than one would silently trace the wrong token (or raise).
+        assert bsz == 1, f"attention blocking only supports batch_size=1, got {bsz}"
+
         prob_layers_type = {}
         if block_types is not None:
             for block_type in block_types:
@@ -132,6 +138,11 @@ class Predictor(nn.Module):
                         answer_token = answer_tokens[:, :, i].unsqueeze(-1)                 #(1, batch_size, 1)
                         a_token = answer_token.item()
                         if a_token == self.tokenizer.eos_token_id or a_token == self.tokenizer.bos_token_id: #2 = <|eot_id|>
+                            # Not measured, but it still has to enter the context:
+                            # skipping it outright would condition every later token
+                            # on a truncated prefix.
+                            tokens[:, cur_pos] = answer_tokens[0, :, i]
+                            cur_pos += 1
                             continue
                         logits = self.model.forward_with_attention_blocking(
                             input_ids=tokens[:, prev_pos:cur_pos],                          #(batch_size, seq_len)
@@ -142,14 +153,14 @@ class Predictor(nn.Module):
                         )                                                                   #(n_layers, batch_size, vocab_size)/(1, batch_size, vocab_size)
 
                         if block_type in ['last_to_last', 'image_to_last', 'question_to_last', 'image_to_question', 'layers_pred']:
-                            probs = torch.softmax(logits / temperature if temperature > 0 else logits, dim=-1)  # (n_layers, batch_size, vocab_size)
+                            probs = torch.softmax(logits / temperature, dim=-1)  # (n_layers, batch_size, vocab_size)
                             indices = answer_token.expand_as(logits[..., :answer_token.shape[2]])               # (n_layers, batch_size, 1)
                             new_prob = probs.gather(dim=2, index=indices).squeeze(-1).transpose(0, 1)           # (n_layers, batch_size, 1) -> (batch_size, n_layers)
                             word = self.tokenizer.decode([a_token])
                             prob_layers_type[block_type].append((word, new_prob))
                         
                         elif block_type == 'full_attention':
-                            probs = torch.softmax(logits.squeeze(0) / temperature if temperature > 0 else logits, dim=-1)   # (batch_size, vocab_size)
+                            probs = torch.softmax(logits.squeeze(0) / temperature, dim=-1)   # (batch_size, vocab_size)
                             indices = answer_token.squeeze(0)                                                               # (batch_size, 1)
                             new_prob = probs.gather(dim=1, index=indices).squeeze(-1)                                       # (batch_size, 1) -> (batch_size)
                             word = self.tokenizer.decode([a_token])
