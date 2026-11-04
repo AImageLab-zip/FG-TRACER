@@ -77,13 +77,13 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    os.makedirs(os.path.dirname(args.answer_path), exist_ok=True) 
+    os.makedirs(os.path.dirname(args.answer_path) or ".", exist_ok=True) 
     for k, v in args._get_kwargs():
         pad = ' '.join(['' for _ in range(25-len(k))])
         print(f"{k}:{pad} {v}", flush=True) 
     torch.cuda.set_device(0)
-    torch.manual_seed(1)
-    np.random.seed(1)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
     print('Initializing Model')
     model = Llama3_Vision(args.checkpoint_dir)

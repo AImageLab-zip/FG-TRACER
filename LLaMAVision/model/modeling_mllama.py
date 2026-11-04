@@ -50,6 +50,44 @@ if is_torch_flex_attn_available():
 logger = logging.get_logger(__name__)
 
 
+NEG_INF = float("-inf")
+
+# How a blocked connection is cut.
+#
+# True (default): the attention weights of the blocked pairs are set to zero AFTER the
+#   softmax. The contribution of those keys is removed outright, the surviving weights
+#   keep their values and no longer sum to one, so the model cannot compensate by
+#   redistributing attention. This also stays meaningful when every key of a row is
+#   blocked: the row's attention output becomes exactly zero, which is what makes
+#   image_to_last and image_to_question measurable on the cross-attention layers.
+#
+# False: the legacy behaviour, which adds -inf to the scores BEFORE the softmax. The
+#   surviving weights are then renormalised to sum to one, so the intervention asks
+#   "what if the model could not see these tokens" rather than "remove this
+#   contribution". On a cross-attention layer, whose only keys are image tokens, it is
+#   a no-op: softmax(s + c) == softmax(s).
+#
+# The two measure different things and are not comparable. All three models must use
+# the same setting. The published figures were produced with False.
+KNOCKOUT_AFTER_SOFTMAX = True
+
+
+def _assert_rows_visible(mask: torch.Tensor, dtype, name: str) -> None:
+    """Check that every query row in `mask` keeps at least one visible key.
+
+    Only meaningful for the pre-softmax path: softmax(s + c) == softmax(s) for a
+    constant c, so masking *every* key of a row leaves the attention weights untouched,
+    and with NEG_INF it yields NaN instead.
+    """
+    visible = (mask > torch.finfo(dtype).min / 2).any(dim=-1)
+    if not bool(visible.all()):
+        raise RuntimeError(
+            f"{name}: at least one query row has every key masked. This pathway "
+            "cannot be cut through the attention mask alone; set "
+            "KNOCKOUT_AFTER_SOFTMAX = True to zero the weights after the softmax."
+        )
+
+
 def _prepare_cross_attention_mask(
     cross_attention_mask: torch.Tensor,
     num_vision_tokens: int, #number of patches
@@ -79,29 +117,6 @@ def _prepare_cross_attention_mask(
     cross_attention_mask *= full_text_row_masked_out_mask
 
     return cross_attention_mask, full_text_row_masked_out_mask
-
-def _prepare_cross_attention_mask_blocking(
-    cross_attention_mask: torch.Tensor,
-    num_vision_tokens: int, #number of patches
-    dtype: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    # reshape so it can be used by attn module
-    #(batch_size, seq_len, max_num_images, max_num_tiles)
-    batch_size, text_total_length, *_ = cross_attention_mask.shape
-    cross_attention_mask = cross_attention_mask.repeat_interleave(num_vision_tokens, dim=3)
-    cross_attention_mask = cross_attention_mask.view(batch_size, text_total_length, -1) #(batch_size, seq_len, num_vision_tokens * max_num_images * max_num_tiles)
-    cross_attention_mask = cross_attention_mask.unsqueeze(1) #(batch_size, 1, seq_len, num_vision_tokens * max_num_images * max_num_tiles)
-
-    # invert the mask
-    # original mask -> 0: masked, 1: not masked
-    # inverted mask -> 0: not masked, -inf: masked
-    inverted_cross_attn_mask = (1.0 - cross_attention_mask).to(dtype)
-    cross_attention_mask = inverted_cross_attn_mask.masked_fill(
-        inverted_cross_attn_mask.to(torch.bool), torch.finfo(dtype).min
-    )
-
-    return cross_attention_mask
-
 
 def _prepare_aspect_ratio_attention_mask(
     aspect_ratio_mask: torch.Tensor,
@@ -893,6 +908,7 @@ class MllamaSelfAttentionDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        attn_row_gate: Optional[torch.Tensor] = None,  # cross-attention only; accepted and ignored here
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -978,7 +994,16 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
+        attn_row_gate: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor]:
+        """
+        attn_row_gate (`torch.Tensor`, *optional*):
+            Shape `(batch, 1, seq_len, 1)`, 1.0 to keep a row and 0.0 to cut it. Zeroes the
+            cross-attention branch for those rows, which `full_text_row_masked_out_mask`
+            does for the MLP branch only. Passed solely by
+            `forward_with_attention_blocking`; left as None the layer behaves exactly as
+            upstream, so ordinary generation is unaffected.
+        """
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -990,6 +1015,8 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             output_attentions=output_attentions,                #False
             cache_position=cache_position,                      #([seq_length])
         )
+        if attn_row_gate is not None:
+            hidden_states = attn_row_gate[:, 0] * hidden_states
         hidden_states = residual + self.cross_attn_attn_gate.tanh() * hidden_states
 
         residual = hidden_states
@@ -1893,10 +1920,17 @@ class MllamaTextModel(MllamaPreTrainedModel):
                     # prepare the causal mask
                     expanded_causal_mask = causal_mask.detach().clone().unsqueeze(0)                                                        # (1, batch_size, 1, query_length, key_value_length)
                     expanded_causal_mask = expanded_causal_mask.expand(n_layers, -1, -1, -1, -1).clone().contiguous()                       # (num_layers, batch_size, 1, query_length, key_value_length) 
-    
-                    # prepare the cross_attention_mask
-                    expanded_cross_attention_mask = cross_attention_mask.detach().clone().unsqueeze(0)                                      #(1, batch_size, 1, seq_len, num_patches * max_num_images * max_num_tiles)
-                    expanded_cross_attention_mask = expanded_cross_attention_mask.expand(n_layers, -1, -1, -1, -1).clone().contiguous()     #(num_layers, batch_size, 1, seq_len, num_patches * max_num_images * max_num_tiles)
+
+                    # the cross_attention_mask is the same for every layer: the image->X
+                    # blocks act on the row gate below, not on this mask
+                    expanded_cross_attention_mask = cross_attention_mask
+
+                    # prepare the row gate: 1.0 keeps a row, 0.0 cuts the cross-attention
+                    # layer off that row entirely
+                    if full_text_row_masked_out_mask is None:
+                        raise ValueError("full_text_row_masked_out_mask is required for attention blocking")
+                    expanded_row_gate = full_text_row_masked_out_mask.detach().clone().unsqueeze(0)                                         #(1, batch_size, 1, seq_len, 1)
+                    expanded_row_gate = expanded_row_gate.expand(n_layers, -1, -1, -1, -1).clone().contiguous()                             #(num_layers, batch_size, 1, seq_len, 1)
                 else:
                     raise ValueError
                 
@@ -1908,18 +1942,40 @@ class MllamaTextModel(MllamaPreTrainedModel):
                 # update mask according to the block type
                 # Block last position from attending to itself
                 if block_type == "last_to_last":
-                    expanded_causal_mask[left_border:right_border, :, :, -1, -1] = torch.finfo(inputs_embeds.dtype).min
+                    expanded_causal_mask[left_border:right_border, :, :, -1, -1] = NEG_INF
+                    _assert_rows_visible(
+                        expanded_causal_mask[left_border:right_border, :, :, -1:, :],
+                        inputs_embeds.dtype, block_type,
+                    )
 
                 # Block last position from attending to the specified modality (Q, I)
                 elif block_type == "question_to_last":
-                    expanded_causal_mask[left_border:right_border, :, :, -1, :- 1] = torch.finfo(inputs_embeds.dtype).min  #last token not included
+                    expanded_causal_mask[left_border:right_border, :, :, -1, :- 1] = NEG_INF  #last token not included
+                    _assert_rows_visible(
+                        expanded_causal_mask[left_border:right_border, :, :, -1:, :],
+                        inputs_embeds.dtype, block_type,
+                    )
 
+                # In a cross-attention layer the only keys are image tokens, so cutting the
+                # image off a row means cutting the whole row, and an attention mask cannot
+                # express that: softmax(s + c) == softmax(s), so the weights are left
+                # unchanged, and in fp16 the constant merely destroys the resolution of the
+                # scores so the row flattens or collapses onto its argmax. There is also
+                # nothing to renormalise over, unlike the self-attention blocks above where
+                # the text keys survive. The faithful analogue is for the layer to contribute
+                # nothing visual to those rows, which is what attn_row_gate does: it zeroes
+                # the cross-attention branch, the only part of the layer that reads the
+                # image. The MLP branch is deliberately left running, on two grounds: its
+                # input is the text residual, so once the attention branch is zeroed it
+                # carries no image anyway, and in Qwen and LLaVA the MLP of a blocked layer
+                # also keeps running, so switching it off here would make this intervention
+                # harsher than theirs and the curves incomparable.
                 elif block_type == "image_to_last":
-                    expanded_cross_attention_mask[left_border:right_border, :, :, -1, :] = torch.finfo(inputs_embeds.dtype).min
-                
+                    expanded_row_gate[left_border:right_border, :, :, -1, :] = 0.0
+
                 # Block question from attending to the image
                 elif block_type == "image_to_question":
-                    expanded_cross_attention_mask[left_border:right_border, :, :, :- 1, :] = torch.finfo(inputs_embeds.dtype).min
+                    expanded_row_gate[left_border:right_border, :, :, :- 1, :] = 0.0
 
                 # create position embeddings to be shared across the decoder layers
                 position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -1937,9 +1993,10 @@ class MllamaTextModel(MllamaPreTrainedModel):
                     layer_outputs = decoder_layer(
                         hidden_states_out,
                         cross_attention_states=cross_attention_states,
-                        cross_attention_mask=expanded_cross_attention_mask[idx],
+                        cross_attention_mask=expanded_cross_attention_mask,
                         attention_mask=expanded_causal_mask[idx],
-                        full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+                        full_text_row_masked_out_mask=full_text_row_masked_out_mask,  # unchanged
+                        attn_row_gate=expanded_row_gate[idx],                         # the block
                         position_ids=position_ids,
                         past_key_value=past_key_values,
                         output_attentions=False,
@@ -2434,12 +2491,17 @@ class MllamaForConditionalGeneration(MllamaPreTrainedModel, GenerationMixin):
                 -1, cross_attention_states.shape[-2], self.hidden_size
             )
 
+        full_text_row_masked_out_mask = None
         if cross_attention_mask is not None:
-            cross_attention_mask = _prepare_cross_attention_mask_blocking(
+            # Use the upstream preparation, which also returns the row gate. The previous
+            # _prepare_cross_attention_mask_blocking dropped that gate and passed None
+            # below, so even the full_attention baseline ran the cross-attention MLP branch
+            # on rows that have no image, unlike an ordinary forward pass.
+            cross_attention_mask, full_text_row_masked_out_mask = _prepare_cross_attention_mask(
                 cross_attention_mask,
                 num_vision_tokens=self.vision_model.num_patches,
                 dtype=self.dtype,
-            ) 
+            )
 
         output_layer_logits = self.language_model.forward_with_attention_blocking(
             input_ids=input_ids,
@@ -2447,7 +2509,7 @@ class MllamaForConditionalGeneration(MllamaPreTrainedModel, GenerationMixin):
             position_ids=position_ids,
             cross_attention_states=cross_attention_states,                  #(max_num_tiles, num_patches, 4096)
             cross_attention_mask=cross_attention_mask,                      #(batch_size, 1, seq_len, num_patches * max_num_images * max_num_tiles)
-            full_text_row_masked_out_mask=None,                             #None / (batch_size, 1, seq_len, 1)
+            full_text_row_masked_out_mask=full_text_row_masked_out_mask,    #(batch_size, 1, seq_len, 1)
             past_key_values=past_key_values,                                #None
             inputs_embeds=inputs_embeds,                                    #None
             block_type=block_type,

@@ -58,10 +58,10 @@ class ChartQADataset(Dataset):
 def parse_args():
     parser = argparse.ArgumentParser(description="CHARTQA Information Flow Eval")
     parser.add_argument(
-        "--answer_path", type=str, default="LLaMAVision/results/chartqa"
+        "--answer_path", type=str, default="./results/chartqa"
     )
     parser.add_argument(
-        "--data_path", type=str, default="LLaMAVision/tracing_information_flow/dataset/chartqa/chartqa_dataset_correct_answers.json"
+        "--data_path", type=str, default="./tracing_information_flow/dataset/chartqa/chartqa_dataset_correct_answers.json"
     )
     parser.add_argument(
         "--batch_size", type=int, default=1

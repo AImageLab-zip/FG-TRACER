@@ -1,18 +1,22 @@
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 import json
 
-with open("LLaMAVision/tracing_information_flow/dataset/chartqa/correct_answers_chartqa.json", "r") as f:
+with open("./dataset/chartqa/chartqa_dataset_correct_answers.json", "r") as f:
     results = json.load(f)
 
 # %%######
 def split_by_sublist(big_list, sub_list):
+    """Split on the LAST occurrence of sub_list, returning (prefix incl. sub, suffix).
+
+    eval_chartqa.py selects the final answer with the last marker, so splitting here on
+    the first one would judge a sample on one span and analyse a different one: a chain of
+    thought often writes "Answer:" mid-reasoning and again at the end.
+    """
     n = len(sub_list)
-    for i in range(len(big_list) - n + 1):
+    for i in range(len(big_list) - n, -1, -1):
         if big_list[i:i+n] == sub_list:
-            before = big_list[:i+n]  # include sub_list
-            after = big_list[i+n:]   # dopo sub_list
-            return before, after
-    return None, None  # se sub non trovato
+            return big_list[:i+n], big_list[i+n:]
+    return None, None
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # Costruzione new_results veloce
 new_results = []
@@ -35,7 +39,8 @@ for result in results:  # 2067 results
     answer_tokens = result['answer_tokens']
 
     # Pulisci dai pad_id_tokens
-    while answer_tokens and answer_tokens[-1] == 128004:
+    # 128004 = pad, 128009 = <|eot_id|>; neither is recorded by generation.py
+    while answer_tokens and answer_tokens[-1] in (128004, 128009):
         answer_tokens = answer_tokens[:-1]
     result['answer_tokens'] = answer_tokens
 
@@ -103,7 +108,7 @@ print(f"**FINAL ANSWER:** ->{count5}")
 print(f"FINAL ANSWER: ->{count6}")
 # %%###############
 # Scrittura su file
-with open("LLaMAVision/tracing_information_flow/dataset/chartqa/chartqa_dataset_correct_answers.json", "w") as f:
+with open("./dataset/chartqa/chartqa_dataset_correct_answers.json", "w") as f:
     json.dump(new_results, f, indent=4)
 # %%##############
 # average length of answer tokens 
@@ -119,3 +124,14 @@ for new_result in new_results:
     len_th += len(new_result['thought_tokens'])
 
 print(f"{len_th/len(new_results)} average length of thought tokens")
+
+
+# average length of final tokens 
+len_th = 0
+for new_result in new_results:
+    len_th += len(new_result['final_tokens'])
+
+print(f"{len_th/len(new_results)} average length of final tokens")
+
+
+# %%

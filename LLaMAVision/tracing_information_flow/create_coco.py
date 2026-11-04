@@ -1,13 +1,13 @@
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 import json
 
-with open("LLaMAVision/results/eval_coco_15000.json", "r") as f:
+with open("../results/eval_coco_15000.json", "r") as f:
     results = json.load(f)
     
 with open("/path/to/coco/annotations/captions_val2014.json", "r") as fp:
     data = json.load(fp)['images']
 
-with open("LLaMAVision/tracing_information_flow/dataset/coco/ids_coco2.json", "r") as fp:
+with open("../dataset/coco/ids_coco2.json", "r") as fp:
     list_ids = json.load(fp)
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # correct answer dataset
@@ -21,7 +21,8 @@ for id in list_ids:
     answer_tokens = result['answer_tokens']
 
     # clean from pad_id_tokens
-    while answer_tokens[-1] == 128004:
+    # 128004 = pad, 128009 = <|eot_id|>; neither is recorded by generation.py
+    while answer_tokens and answer_tokens[-1] in (128004, 128009):
         answer_tokens= answer_tokens[:-1]
         
     result['answer_tokens'] = answer_tokens
@@ -66,6 +67,6 @@ for new_result in new_results_sampled:
 
 print(f"{len_answ/len(new_results_sampled)} average length of answer tokens")
 # %%##############
-with open("LLaMAVision/datasets/coco/coco_dataset_correct_answers_sampled.json", "w") as f:
+with open("./dataset/coco/coco_dataset_correct_answers_sampled.json", "w") as f:
     json.dump(new_results_sampled, f, indent=2)
 

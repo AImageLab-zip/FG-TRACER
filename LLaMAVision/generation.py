@@ -134,7 +134,9 @@ class Llama3_Vision(nn.Module):
         prompts,
         answer_tokens,
         images,
-        temperature: float = 0.6,
+        temperature: float = 1.0,   # 1.0 = the model's own distribution. Anything else
+                                            # rescales every probability and makes the deltas
+                                            # incomparable across models.
         max_gen_len: Optional[int] = None,
         block_types: List[str] = None,
         k: int = 9,
@@ -182,6 +184,11 @@ class Llama3_Vision(nn.Module):
             attention_mask[j, : len(t)] = processor_tokens['attention_mask'][j].clone().detach()
             cross_attention_mask[j, : len(t)] = processor_tokens['cross_attention_mask'][j].clone().detach()
         
+        assert temperature > 0, "temperature must be positive"
+        # answer_token.item() below collapses the batch dimension, so a batch larger
+        # than one would silently trace the wrong token (or raise).
+        assert bsz == 1, f"attention blocking only supports batch_size=1, got {bsz}"
+
         prob_layers_type = {}
         if block_types is not None:
             for block_type in block_types:
@@ -194,6 +201,13 @@ class Llama3_Vision(nn.Module):
                         answer_token = answer_tokens[:, :, i].unsqueeze(-1)                 #(1, batch_size, 1)
                         a_token = answer_token.item()
                         if a_token == self.llama_processor.tokenizer.eos_token_id : #128009 = <|eot_id|>
+                            # Not measured, but it still has to enter the context:
+                            # skipping it outright would condition every later token
+                            # on a truncated prefix.
+                            tokens[:, cur_pos] = answer_tokens[0, :, i]
+                            attention_mask[:, cur_pos] = 1
+                            cross_attention_mask[:, cur_pos, :, :] = cross_attention_mask[:, cur_pos-1, :, :]
+                            cur_pos += 1
                             continue
                         logits = self.llama_model.forward_with_attention_blocking(
                             input_ids=tokens[:, prev_pos:cur_pos],                          #(batch_size, seq_len)
@@ -207,14 +221,14 @@ class Llama3_Vision(nn.Module):
                         )                                                                   #(n_layers, batch_size, vocab_size)/(1, batch_size, vocab_size)
 
                         if block_type in ['last_to_last', 'image_to_last', 'question_to_last', 'image_to_question', 'layers_pred']:
-                            probs = torch.softmax(logits / temperature if temperature > 0 else logits, dim=-1)  # (n_layers, batch_size, vocab_size)
+                            probs = torch.softmax(logits / temperature, dim=-1)  # (n_layers, batch_size, vocab_size)
                             indices = answer_token.expand_as(logits[..., :answer_token.shape[2]])               # (n_layers, batch_size, 1)
                             new_prob = probs.gather(dim=2, index=indices).squeeze(-1).transpose(0, 1)           # (n_layers, batch_size, 1) -> (batch_size, n_layers)
                             word = self.llama_processor.tokenizer.decode([a_token])
                             prob_layers_type[block_type].append((word, new_prob))
             
                         elif block_type == 'full_attention':
-                            probs = torch.softmax(logits.squeeze(0) / temperature if temperature > 0 else logits, dim=-1)   # (batch_size, vocab_size)
+                            probs = torch.softmax(logits.squeeze(0) / temperature, dim=-1)   # (batch_size, vocab_size)
                             indices = answer_token.squeeze(0)                                                               # (batch_size, 1)
                             new_prob = probs.gather(dim=1, index=indices).squeeze(-1)                                       # (batch_size, 1) -> (batch_size)
                             word = self.llama_processor.tokenizer.decode([a_token])
