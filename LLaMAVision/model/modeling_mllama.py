@@ -52,25 +52,6 @@ logger = logging.get_logger(__name__)
 
 NEG_INF = float("-inf")
 
-# How a blocked connection is cut.
-#
-# True (default): the attention weights of the blocked pairs are set to zero AFTER the
-#   softmax. The contribution of those keys is removed outright, the surviving weights
-#   keep their values and no longer sum to one, so the model cannot compensate by
-#   redistributing attention. This also stays meaningful when every key of a row is
-#   blocked: the row's attention output becomes exactly zero, which is what makes
-#   image_to_last and image_to_question measurable on the cross-attention layers.
-#
-# False: the legacy behaviour, which adds -inf to the scores BEFORE the softmax. The
-#   surviving weights are then renormalised to sum to one, so the intervention asks
-#   "what if the model could not see these tokens" rather than "remove this
-#   contribution". On a cross-attention layer, whose only keys are image tokens, it is
-#   a no-op: softmax(s + c) == softmax(s).
-#
-# The two measure different things and are not comparable. All three models must use
-# the same setting. The published figures were produced with False.
-KNOCKOUT_AFTER_SOFTMAX = True
-
 
 def _assert_rows_visible(mask: torch.Tensor, dtype, name: str) -> None:
     """Check that every query row in `mask` keeps at least one visible key.
@@ -82,9 +63,10 @@ def _assert_rows_visible(mask: torch.Tensor, dtype, name: str) -> None:
     visible = (mask > torch.finfo(dtype).min / 2).any(dim=-1)
     if not bool(visible.all()):
         raise RuntimeError(
-            f"{name}: at least one query row has every key masked. This pathway "
-            "cannot be cut through the attention mask alone; set "
-            "KNOCKOUT_AFTER_SOFTMAX = True to zero the weights after the softmax."
+            f"{name}: at least one query row has every key masked. This pathway cannot "
+            "be cut through the attention mask alone; cut it with "
+            "`cross_attn_post_softmax_mask` instead, which zeroes the attention weights "
+            "after the softmax."
         )
 
 
@@ -512,8 +494,18 @@ class MllamaTextCrossAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        post_softmax_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel
+
+        post_softmax_mask (`torch.Tensor`, *optional*):
+            Broadcastable to the attention weights `(bsz, num_heads, q_len, kv_len)`,
+            1.0 to keep a weight and 0.0 to cut it. Applied AFTER the softmax, so the
+            surviving weights are not renormalised. Used by
+            `forward_with_attention_blocking` to cut whole rows, which the attention
+            mask cannot express on a cross-attention layer. Left as None the module
+            behaves exactly as upstream.
+        """
         bsz, q_len, _ = hidden_states.size()
         query_states = self.q_proj(hidden_states)
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -550,7 +542,15 @@ class MllamaTextCrossAttention(nn.Module):
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32)
+        if post_softmax_mask is not None:
+            # Zeroing here and not before the softmax: on this layer every key is an
+            # image token, so a row cut through the mask is softmax(s + c) == softmax(s),
+            # i.e. unchanged, and NEG_INF on every key gives NaN. A zeroed row makes
+            # attn_output exactly 0, and o_proj is bias-free, so the branch contributes
+            # nothing at all. Done in fp32, before the cast, so 0.0 stays exactly 0.0.
+            attn_weights = attn_weights * post_softmax_mask.to(attn_weights.dtype)
+        attn_weights = attn_weights.to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -579,14 +579,20 @@ class MllamaTextCrossSdpaAttention(MllamaTextCrossAttention):
         output_attentions: bool = False,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        post_softmax_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
-        if output_attentions:
-            # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
-            logger.warning_once(
-                "MllamaModel is using MllamaTextCrossSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
-                'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-            )
+        # scaled_dot_product_attention never materialises the attention weights, so there
+        # is nothing to zero after the softmax. When a post_softmax_mask is given we fall
+        # back to the eager implementation, exactly as upstream already does for
+        # output_attentions. Ordinary generation passes no mask and stays on SDPA.
+        if output_attentions or post_softmax_mask is not None:
+            if output_attentions:
+                # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
+                logger.warning_once(
+                    "MllamaModel is using MllamaTextCrossSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
+                    'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                )
             return super().forward(
                 hidden_states=hidden_states,
                 cross_attention_states=cross_attention_states,
@@ -595,6 +601,7 @@ class MllamaTextCrossSdpaAttention(MllamaTextCrossAttention):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
+                post_softmax_mask=post_softmax_mask,
             )
 
         bsz, q_len, _ = hidden_states.size()
@@ -908,7 +915,7 @@ class MllamaSelfAttentionDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-        attn_row_gate: Optional[torch.Tensor] = None,  # cross-attention only; accepted and ignored here
+        cross_attn_post_softmax_mask: Optional[torch.Tensor] = None,  # cross-attention only; accepted and ignored here
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -994,15 +1001,19 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
-        attn_row_gate: Optional[torch.Tensor] = None,
+        cross_attn_post_softmax_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor]:
         """
-        attn_row_gate (`torch.Tensor`, *optional*):
-            Shape `(batch, 1, seq_len, 1)`, 1.0 to keep a row and 0.0 to cut it. Zeroes the
-            cross-attention branch for those rows, which `full_text_row_masked_out_mask`
-            does for the MLP branch only. Passed solely by
-            `forward_with_attention_blocking`; left as None the layer behaves exactly as
-            upstream, so ordinary generation is unaffected.
+        cross_attn_post_softmax_mask (`torch.Tensor`, *optional*):
+            Shape `(batch, 1, seq_len, 1)`, 1.0 to keep a row and 0.0 to cut it. Handed
+            to the cross-attention module, which multiplies the attention weights by it
+            AFTER the softmax: a cut row ends up with every weight at zero, so the
+            branch contributes nothing visual to that row. This is the only way to cut
+            this pathway, because on a cross-attention layer every key is an image token
+            and the attention mask cannot express "no keys at all". It leaves the MLP
+            branch alone, which keeps its own gate in `full_text_row_masked_out_mask`.
+            Passed solely by `forward_with_attention_blocking`; left as None the layer
+            behaves exactly as upstream, so ordinary generation is unaffected.
         """
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -1014,9 +1025,8 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             past_key_value=past_key_value,                      #None
             output_attentions=output_attentions,                #False
             cache_position=cache_position,                      #([seq_length])
+            post_softmax_mask=cross_attn_post_softmax_mask,     #(batch_size, 1, seq_lenth, 1) or None
         )
-        if attn_row_gate is not None:
-            hidden_states = attn_row_gate[:, 0] * hidden_states
         hidden_states = residual + self.cross_attn_attn_gate.tanh() * hidden_states
 
         residual = hidden_states
@@ -1920,17 +1930,12 @@ class MllamaTextModel(MllamaPreTrainedModel):
                     # prepare the causal mask
                     expanded_causal_mask = causal_mask.detach().clone().unsqueeze(0)                                                        # (1, batch_size, 1, query_length, key_value_length)
                     expanded_causal_mask = expanded_causal_mask.expand(n_layers, -1, -1, -1, -1).clone().contiguous()                       # (num_layers, batch_size, 1, query_length, key_value_length) 
-
-                    # the cross_attention_mask is the same for every layer: the image->X
-                    # blocks act on the row gate below, not on this mask
                     expanded_cross_attention_mask = cross_attention_mask
 
-                    # prepare the row gate: 1.0 keeps a row, 0.0 cuts the cross-attention
-                    # layer off that row entirely
                     if full_text_row_masked_out_mask is None:
                         raise ValueError("full_text_row_masked_out_mask is required for attention blocking")
-                    expanded_row_gate = full_text_row_masked_out_mask.detach().clone().unsqueeze(0)                                         #(1, batch_size, 1, seq_len, 1)
-                    expanded_row_gate = expanded_row_gate.expand(n_layers, -1, -1, -1, -1).clone().contiguous()                             #(num_layers, batch_size, 1, seq_len, 1)
+                    expanded_post_softmax_mask = torch.ones_like(full_text_row_masked_out_mask).unsqueeze(0)                                #(1, batch_size, 1, seq_len, 1)
+                    expanded_post_softmax_mask = expanded_post_softmax_mask.expand(n_layers, -1, -1, -1, -1).clone().contiguous()           #(num_layers, batch_size, 1, seq_len, 1)
                 else:
                     raise ValueError
                 
@@ -1956,26 +1961,12 @@ class MllamaTextModel(MllamaPreTrainedModel):
                         inputs_embeds.dtype, block_type,
                     )
 
-                # In a cross-attention layer the only keys are image tokens, so cutting the
-                # image off a row means cutting the whole row, and an attention mask cannot
-                # express that: softmax(s + c) == softmax(s), so the weights are left
-                # unchanged, and in fp16 the constant merely destroys the resolution of the
-                # scores so the row flattens or collapses onto its argmax. There is also
-                # nothing to renormalise over, unlike the self-attention blocks above where
-                # the text keys survive. The faithful analogue is for the layer to contribute
-                # nothing visual to those rows, which is what attn_row_gate does: it zeroes
-                # the cross-attention branch, the only part of the layer that reads the
-                # image. The MLP branch is deliberately left running, on two grounds: its
-                # input is the text residual, so once the attention branch is zeroed it
-                # carries no image anyway, and in Qwen and LLaVA the MLP of a blocked layer
-                # also keeps running, so switching it off here would make this intervention
-                # harsher than theirs and the curves incomparable.
                 elif block_type == "image_to_last":
-                    expanded_row_gate[left_border:right_border, :, :, -1, :] = 0.0
+                    expanded_post_softmax_mask[left_border:right_border, :, :, -1, :] = 0.0
 
                 # Block question from attending to the image
                 elif block_type == "image_to_question":
-                    expanded_row_gate[left_border:right_border, :, :, :- 1, :] = 0.0
+                    expanded_post_softmax_mask[left_border:right_border, :, :, :- 1, :] = 0.0
 
                 # create position embeddings to be shared across the decoder layers
                 position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -1996,7 +1987,7 @@ class MllamaTextModel(MllamaPreTrainedModel):
                         cross_attention_mask=expanded_cross_attention_mask,
                         attention_mask=expanded_causal_mask[idx],
                         full_text_row_masked_out_mask=full_text_row_masked_out_mask,  # unchanged
-                        attn_row_gate=expanded_row_gate[idx],                         # the block
+                        cross_attn_post_softmax_mask=expanded_post_softmax_mask[idx],  # the block
                         position_ids=position_ids,
                         past_key_value=past_key_values,
                         output_attentions=False,
